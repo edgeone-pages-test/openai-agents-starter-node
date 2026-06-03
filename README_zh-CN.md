@@ -18,15 +18,18 @@
 
 ```text
 openAI-agent-starter/
-├── agents/                        # Node/TS 后端（EdgeOne Makers）
+├── agents/                        # 有状态的 EdgeOne Makers Agent Functions（Node/TS）
 │   ├── chat/
 │   │   └── index.ts              # POST /chat — SSE 流式聊天
-│   ├── history/
-│   │   └── index.ts              # POST /history — 对话历史
 │   ├── stop/
-│   │   └── index.ts              # POST /stop — 中断 agent
+│   │   └── index.ts              # POST /stop — 中断正在执行的 agent
 │   ├── _logger.ts                # 日志工具（私有模块）
+│   ├── _sse.ts                   # SSE 辅助函数（私有模块）
 │   └── _tools.ts                 # Agent 工具定义（私有模块）
+├── cloud-functions/               # 无状态的 EdgeOne Pages Node Functions
+│   ├── history/
+│   │   └── index.ts              # POST /history — 拉取对话消息
+│   └── _logger.ts                # 日志工具
 ├── src/                           # React 前端（Vite + TypeScript）
 │   ├── App.tsx                    # 主应用组件
 │   ├── api.ts                    # 后端 API 封装（SSE 流式调用）
@@ -46,6 +49,8 @@ openAI-agent-starter/
 ```
 
 > 以 `_` 开头的文件是私有模块，不会被 EdgeOne 映射为公开路由。
+>
+> **为什么后端拆成两个目录？** `agents/` 跑的是有状态、长连接的路由（活跃 SSE 流、按会话维度的 abort 信号）；`cloud-functions/` 跑的是只读 `context.agent.store` 的短小无状态路由。两者拆开之后，历史记录拉取就不会和正在进行的对话争抢同一会话的锁。
 
 ## 环境变量
 
@@ -57,11 +62,11 @@ openAI-agent-starter/
 
 ## API 接口
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/chat` | POST | SSE 流式聊天，Header 带 `makers-conversation-id` |
-| `/stop` | POST | 中断正在执行的 agent，Body 传 `{ "conversation_id": "..." }` |
-| `/history` | POST | 获取对话历史，Header 带 `makers-conversation-id` |
+| 端点 | 方法 | 所在目录 | 说明 |
+|------|------|----------|------|
+| `/chat` | POST | `agents/` | SSE 流式聊天，Header 带 `makers-conversation-id` |
+| `/stop` | POST | `agents/` | 中断正在执行的 agent，Body 传 `{ "conversation_id": "..." }` |
+| `/history` | POST | `cloud-functions/` | 获取对话历史，Header 带 `makers-conversation-id` |
 
 ### SSE 事件
 
@@ -75,13 +80,17 @@ event: done           data: {"stopped":false}
 
 ## 架构
 
-### 后端（`agents/`）
+### 后端（`agents/` + `cloud-functions/`)
+
+`agents/` 是有状态的部分，持有正在进行的 SSE 流以及对应的 AbortSignal：
 
 1. **在 `agents/chat/index.ts` 内联 LLM 模型配置** — 从环境配置创建 OpenAI Agents SDK 模型
 2. **`createTools()`** — 返回自定义 Agent 工具列表（天气、穿衣、翻译、统计）
 3. **`context.store.openaiSession(conversationId)`** — 提供 session 持久化，用于多轮对话记忆
 4. **`run(agent, message, { session, stream, signal })`** — 启动 Agent 并流式输出
 5. **SSE 输出** — 依次 yield `text_delta`、`tool_called`、`done`、`error` 事件
+
+`cloud-functions/history` 是无状态的 `/history` 路由——只调用 `context.agent.store.getMessages()` 恢复刷新页面后的聊天历史，不会启动 agent。
 
 ### 前端（`src/`）
 

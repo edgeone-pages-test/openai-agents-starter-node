@@ -18,15 +18,18 @@ A full-stack EdgeOne Makers Agent template powered by the OpenAI Agents SDK (Typ
 
 ```text
 openAI-agent-starter/
-├── agents/                        # Node/TS backend (EdgeOne Makers)
+├── agents/                        # Stateful EdgeOne Makers Agent Functions (Node/TS)
 │   ├── chat/
 │   │   └── index.ts              # POST /chat — SSE streaming chat
-│   ├── history/
-│   │   └── index.ts              # POST /history — conversation history
 │   ├── stop/
-│   │   └── index.ts              # POST /stop — abort active run
+│   │   └── index.ts              # POST /stop — abort active agent run
 │   ├── _logger.ts                # Logger utility (private module)
+│   ├── _sse.ts                   # SSE helpers (private module)
 │   └── _tools.ts                 # Agent tool definitions (private module)
+├── cloud-functions/               # Stateless EdgeOne Pages Node Functions
+│   ├── history/
+│   │   └── index.ts              # POST /history — load conversation messages
+│   └── _logger.ts                # Logger utility
 ├── src/                           # React frontend (Vite + TypeScript)
 │   ├── App.tsx                    # Main app component
 │   ├── api.ts                    # Backend API wrappers (SSE streaming)
@@ -46,6 +49,8 @@ openAI-agent-starter/
 ```
 
 > Files prefixed with `_` are private modules — not mapped as public routes by EdgeOne.
+>
+> **Why two backend folders?** `agents/` holds long-running, stateful routes (active SSE streams, per-conversation abort signals); `cloud-functions/` holds short, stateless routes that just read `context.agent.store`. Splitting them keeps history requests from contending with an active chat for the per-conversation lock.
 
 ## Environment Variables
 
@@ -57,11 +62,11 @@ openAI-agent-starter/
 
 ## API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/chat` | POST | SSE streaming chat. Header: `makers-conversation-id` |
-| `/stop` | POST | Abort the active agent run. Body: `{ "conversation_id": "..." }` |
-| `/history` | POST | Get conversation history. Header: `makers-conversation-id` |
+| Endpoint | Method | Side | Description |
+|----------|--------|------|-------------|
+| `/chat` | POST | `agents/` | SSE streaming chat. Header: `makers-conversation-id` |
+| `/stop` | POST | `agents/` | Abort the active agent run. Body: `{ "conversation_id": "..." }` |
+| `/history` | POST | `cloud-functions/` | Get conversation history. Header: `makers-conversation-id` |
 
 ### SSE Events
 
@@ -75,13 +80,17 @@ event: done           data: {"stopped":false}
 
 ## Architecture
 
-### Backend (`agents/`)
+### Backend (`agents/` + `cloud-functions/`)
+
+`agents/` is where the stateful work happens — it owns the live SSE stream and the AbortSignal for the running model call:
 
 1. **Inline LLM model config in `agents/chat/index.ts`** — Creates OpenAI Agents SDK model from environment config
 2. **`createTools()`** — Returns the list of custom Agent tools (weather, clothing, translate, statistics)
 3. **`context.store.openaiSession(conversationId)`** — Provides session persistence for multi-turn memory
 4. **`run(agent, message, { session, stream, signal })`** — Launches the Agent with streaming output
 5. **SSE output** — Yields `text_delta`, `tool_called`, `done`, `error` events
+
+`cloud-functions/history` is the stateless `/history` route — it just reads `context.agent.store.getMessages()` to restore the chat after a page refresh, without spinning up an agent run.
 
 ### Frontend (`src/`)
 
