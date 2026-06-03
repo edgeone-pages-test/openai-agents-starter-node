@@ -80,14 +80,29 @@ export function sseResponse(
           next = await iter.next();
         }
       } catch (e: unknown) {
-        const err = e as Error;
+        const err = e as Error & {
+          status?: number;
+          error?: unknown;
+          response?: unknown;
+          cause?: unknown;
+        };
         if (err?.name === 'AbortError' || signal?.aborted) {
           stopped = true;
           logger?.log('[stream] aborted by user');
         } else {
           logger?.error('[stream] error:', err?.message, err?.stack);
           if (errorEvent) {
-            enqueue({ event: errorEvent, data: { message: String(err?.message ?? e) } });
+            enqueue({
+              event: errorEvent,
+              data: {
+                message: String(err?.message ?? e),
+                name: err?.name || 'Error',
+                stack: err?.stack,
+                status: err?.status,
+                detail: err?.error ?? err?.response,
+                cause: err?.cause,
+              },
+            });
           }
         }
       } finally {
