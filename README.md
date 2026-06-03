@@ -2,6 +2,10 @@
 
 A full-stack EdgeOne Makers Agent template powered by the OpenAI Agents SDK (TypeScript). Demonstrates how to build a streaming chat Agent with custom tools, session memory, and real-time tool indicators.
 
+## Deploy
+
+[![Deploy with EdgeOne Pages](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://edgeone.ai/makers/new?template=openai-agents-starter-node&from=within&fromAgent=1&agentLang=typescript)
+
 ## Features
 
 - **SSE Streaming Chat** — Token-by-token `text_delta` push; `tool_called` events when tools are invoked
