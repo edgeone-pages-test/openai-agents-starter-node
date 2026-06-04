@@ -36,11 +36,12 @@ export async function onRequest(context: any) {
   const signal: AbortSignal | undefined = context.request.signal;
 
   // Use built-in store session adapter for persistence
-  const session: Session | undefined =
-    context.store && context.conversation_id ? context.store.openaiSession(context.conversation_id) : undefined;
+  const session: Session | undefined = context.conversation_id
+    ? context.store.openaiSession(context.conversation_id)
+    : undefined;
 
   // Configure the OpenAI-compatible LLM model directly from runtime env.
-  const env = (context.env ?? {}) as Record<string, string | undefined>;
+  const env = context.env as Record<string, string | undefined>;
   const llmClient = new OpenAI({
     apiKey: env.AI_GATEWAY_API_KEY,
     baseURL: env.AI_GATEWAY_BASE_URL,

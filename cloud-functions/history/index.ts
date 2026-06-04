@@ -105,13 +105,13 @@ export async function onRequestPost(context: any): Promise<Response> {
 
   const body = await readJsonBody(context);
   const conversationId = getConversationId(context, body);
-  const store = context.agent?.store ?? null;
+  const { store } = context.agent;
 
   logger.log('conversationId:', conversationId || '-');
 
-  if (!store || !conversationId) {
+  if (!conversationId) {
     logger.log(
-      `[history] end: ${new Date().toISOString()}, total: ${Date.now() - requestStartTime}ms (no store or conversationId)`,
+      `[history] end: ${new Date().toISOString()}, total: ${Date.now() - requestStartTime}ms (no conversationId)`,
     );
     return jsonResponse({ conversation_id: conversationId, messages: [] });
   }
