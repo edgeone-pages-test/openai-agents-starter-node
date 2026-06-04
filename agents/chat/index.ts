@@ -25,7 +25,8 @@ const logger = createLogger('chat');
 const DEFAULT_MODEL = '@makers/hy3-preview';
 
 export async function onRequest(context: any) {
-  const message = (context.request.body ?? {}).message as string | undefined;
+  const body = context.request.body ?? {};
+  const message = body.message as string | undefined;
   if (!message) {
     return new Response(
       JSON.stringify({ error: "'message' is required" }),
@@ -33,11 +34,46 @@ export async function onRequest(context: any) {
     );
   }
 
+  // Accept both camelCase (chat handler historical convention) and snake_case
+  // (cloud-functions convention) as a body field name for the user id.
+  const rawUserId = typeof body.userId === 'string'
+    ? body.userId
+    : (typeof body.user_id === 'string' ? body.user_id : '');
+  const userId = rawUserId.trim() || undefined;
+  const userMsgId = typeof body.userMsgId === 'string' ? body.userMsgId : undefined;
+
+  const conversationId: string = context.conversation_id ?? '';
   const signal: AbortSignal | undefined = context.request.signal;
 
+  logger.log(`[request] cid=${conversationId}, uid=${userId ?? '-'}, message="${message.slice(0, 50)}..."`);
+
+  // Write a user-indexed copy of the user message so /conversations
+  // (which scans the user_conversation_index prefix) can list this thread.
+  // The OpenAI Agents SDK Session adapter does NOT pass user_id when it
+  // persists turns, so without this manual write the user index stays
+  // empty and listConversations({userId}) returns []. The duplicate is
+  // filtered out of /history because that route already drops items
+  // marked with metadata.agent_sdk_session.
+  if (userId && conversationId) {
+    try {
+      const appendArgs: Record<string, unknown> = {
+        conversationId,
+        role: 'user',
+        content: message,
+        userId,
+      };
+      if (userMsgId) appendArgs.messageId = userMsgId;
+      await context.store.appendMessage(appendArgs);
+    } catch (e) {
+      // Non-fatal — chat itself should keep working even if the
+      // user-index write fails.
+      logger.error('[chat] failed to write user index:', e);
+    }
+  }
+
   // Use built-in store session adapter for persistence
-  const session: Session | undefined = context.conversation_id
-    ? context.store.openaiSession(context.conversation_id)
+  const session: Session | undefined = conversationId
+    ? context.store.openaiSession(conversationId)
     : undefined;
 
   // Configure the OpenAI-compatible LLM model directly from runtime env.

@@ -1,12 +1,24 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
-import type { Message, ToolLampState } from './types';
-import { fetchConversationHistory, sendMessageStream, stopAgent } from './api';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import type {
+  Message,
+  ToolLampState,
+  ConversationSummary,
+} from './types';
+import {
+  fetchConversationHistory,
+  sendMessageStream,
+  stopAgent,
+  listConversations,
+  clearConversationHistory,
+  deleteConversation,
+} from './api';
 import type { RawSseEvent } from './api';
 import ToolIndicators from './components/ToolIndicators';
 import ChatWindow from './components/ChatWindow';
 import ChatInput from './components/ChatInput';
 import DebugPanel from './components/DebugPanel';
 import CodeViewer from './components/CodeViewer';
+import ConversationSidebar from './components/ConversationSidebar';
 import { I18nProvider, LangToggle, useT, MessageKeys } from './i18n';
 import { deleteSnapshot, loadSnapshot, saveSnapshot } from './lib/chatUiStore';
 import styles from './App.module.css';
@@ -27,6 +39,17 @@ const LAMP_I18N_KEYS: Record<string, string> = {
 
 const CONVERSATION_ID_STORAGE_KEY = 'eo_conversation_id';
 
+/**
+ * eo-uuid: stable per-browser identifier. Generated client-side on first
+ * visit and persisted in localStorage. Used as the `userId` argument to all
+ * memory-store calls so that listConversations / clear / delete can scope
+ * results to "this browser's conversations only". Cross-template aware:
+ * intentionally shares the same localStorage key with claude-agent-starter
+ * so the same browser sees the same identity in either template.
+ */
+const EO_USER_ID_STORAGE_KEY = 'eo-uuid';
+const CONVERSATIONS_PAGE_SIZE = 20;
+
 /** Returns existing conversation ID from localStorage, or null if first visit */
 function getExistingConversationId(): string | null {
   return localStorage.getItem(CONVERSATION_ID_STORAGE_KEY);
@@ -40,6 +63,14 @@ function getOrCreateConversationId(): string {
   const conversationId = crypto.randomUUID();
   localStorage.setItem(CONVERSATION_ID_STORAGE_KEY, conversationId);
   return conversationId;
+}
+
+function getOrCreateEoUuid(): string {
+  const cached = localStorage.getItem(EO_USER_ID_STORAGE_KEY);
+  if (cached) return cached;
+  const eoUuid = crypto.randomUUID();
+  localStorage.setItem(EO_USER_ID_STORAGE_KEY, eoUuid);
+  return eoUuid;
 }
 
 // Module-level dedup flag — outside React lifecycle, unaffected by StrictMode
@@ -73,12 +104,25 @@ function AppInner() {
   const [debugEvents, setDebugEvents] = useState<RawSseEvent[]>([]);
   const [rightPanelMode, setRightPanelMode] = useState<'code' | 'debug'>('code');
 
+  // Conversation list (sidebar) state
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [conversationsLoading, setConversationsLoading] = useState(true);
+  const [conversationsLoadingMore, setConversationsLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
+  const [activeConversationId, setActiveConversationId] = useState<string>(() => getOrCreateConversationId());
+
   const botMsgIdRef = useRef<string>('');
   const abortCtrlRef = useRef<AbortController | null>(null);
   const hadExistingConversationIdRef = useRef(getExistingConversationId() !== null);
-  const conversationIdRef = useRef<string>(getOrCreateConversationId());
+  const conversationIdRef = useRef<string>(activeConversationId);
+  const eoUuidRef = useRef<string>(getOrCreateEoUuid());
   const initDoneRef = useRef(false);
   const snapshotTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keep conversationIdRef in sync with the activeConversationId state.
+  useEffect(() => {
+    conversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
 
   // Update lamp labels when language changes
   useEffect(() => {
@@ -90,6 +134,8 @@ function AppInner() {
     );
   }, [t]);
 
+  // Persist a UI snapshot of the current conversation's messages to IndexedDB
+  // (debounced) so a refresh restores instantly without hitting /history.
   useEffect(() => {
     if (messages.length === 0) return;
     if (!initDoneRef.current) return;
@@ -106,45 +152,100 @@ function AppInner() {
     };
   }, [messages]);
 
-  useEffect(() => {
-    // First visit: no existing conversation → skip history fetch for instant load
-    if (!hadExistingConversationIdRef.current) {
-      setHistoryLoading(false);
-      return;
-    }
-
-    const convId = conversationIdRef.current;
+  /** Load full message list for a conversation: snapshot first, then /history reconciliation. */
+  const loadConversation = useCallback(async (convId: string) => {
+    setHistoryLoading(true);
     let restoredFromSnapshot = false;
     let snapshotMessageCount = 0;
 
-    const restoreSnapshot = () => loadSnapshot(convId).then(snapshot => {
+    try {
+      const snapshot = await loadSnapshot(convId).catch(() => [] as Message[]);
       snapshotMessageCount = snapshot.length;
       if (snapshot.length > 0) {
         restoredFromSnapshot = true;
         setMessages(snapshot);
         setHistoryLoading(false);
       }
-    }).catch(() => {});
 
+      const history = await fetchConversationHistory(convId, eoUuidRef.current);
+      if (history.length > 0) {
+        if (!restoredFromSnapshot || history.length > snapshotMessageCount) {
+          setMessages(history);
+        }
+        saveSnapshot(convId, history).catch(() => {});
+      } else if (!restoredFromSnapshot) {
+        setMessages([]);
+      }
+    } finally {
+      setHistoryLoading(false);
+      initDoneRef.current = true;
+    }
+  }, []);
+
+  /** Refresh sidebar conversations list. mode='replace' → reload from start; 'append' → add next page. */
+  const refreshConversations = useCallback(async (mode: 'replace' | 'append', cursor?: string) => {
+    if (mode === 'append') {
+      setConversationsLoadingMore(true);
+    } else {
+      setConversationsLoading(true);
+    }
+    try {
+      const res = await listConversations({
+        userId: eoUuidRef.current,
+        limit: CONVERSATIONS_PAGE_SIZE,
+        order: 'desc',
+        after: cursor,
+      });
+
+      setNextCursor(res.nextCursor);
+
+      if (mode === 'append') {
+        setConversations(prev => {
+          const seen = new Set(prev.map(c => c.id));
+          const merged = [...prev];
+          for (const c of res.conversations) {
+            if (!seen.has(c.id)) merged.push(c);
+          }
+          return merged;
+        });
+      } else {
+        setConversations(res.conversations);
+      }
+    } finally {
+      if (mode === 'append') {
+        setConversationsLoadingMore(false);
+      } else {
+        setConversationsLoading(false);
+      }
+    }
+  }, []);
+
+  // Initial load: history (only if previously visited) + conversations list
+  useEffect(() => {
     if (_historyFetchInFlight) {
-      restoreSnapshot().finally(() => setHistoryLoading(false));
+      void refreshConversations('replace');
       return;
     }
     _historyFetchInFlight = true;
 
-    restoreSnapshot().finally(() => {
-      fetchConversationHistory(convId).then(history => {
-        if (history.length > 0) {
-          if (!restoredFromSnapshot || history.length > snapshotMessageCount) {
-            setMessages(history);
-          }
-          saveSnapshot(convId, history).catch(() => {});
-        }
-      }).finally(() => {
+    if (!hadExistingConversationIdRef.current) {
+      // First visit: skip /history fetch (would be empty). Still kick off the
+      // conversations list so the sidebar shows the user's other browsers'
+      // conversations if any (rare but possible).
+      setHistoryLoading(false);
+      initDoneRef.current = true;
+      void refreshConversations('replace').finally(() => {
         _historyFetchInFlight = false;
-        setHistoryLoading(false);
+      });
+      return;
+    }
+
+    void loadConversation(conversationIdRef.current).finally(() => {
+      void refreshConversations('replace').finally(() => {
+        _historyFetchInFlight = false;
       });
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Update the current bot message's content via an updater function. */
@@ -203,6 +304,47 @@ function AppInner() {
     setMessages(prev => [...prev, userMsg, botMsg]);
     setLoading(true);
 
+    /**
+     * Optimistic sidebar update — fires as soon as the backend emits its first
+     * SSE event (matches ChatGPT's "new chat appears the moment streaming
+     * starts" UX). For brand-new conversations we prepend a synthesized summary;
+     * for existing ones we just bump them to the top.
+     *
+     * Server reconciliation still happens in onDone() via refreshConversations,
+     * which can correct the title if the runtime later overrides it.
+     */
+    let sidebarPrimed = false;
+    const cleanedText = text.replace(/\s+/g, ' ').trim();
+    const optimisticTitle =
+      cleanedText.length === 0 ? 'New chat'
+        : cleanedText.length <= 8 ? cleanedText
+          : `${cleanedText.slice(0, 8)}...`;
+
+    const primeSidebar = () => {
+      if (sidebarPrimed) return;
+      sidebarPrimed = true;
+
+      const convId = conversationIdRef.current;
+      const now = Date.now();
+
+      setConversations(prev => {
+        const idx = prev.findIndex(c => c.id === convId);
+        if (idx === -1) {
+          const summary: ConversationSummary = {
+            id: convId,
+            title: optimisticTitle,
+            lastMessageAt: now,
+            userId: eoUuidRef.current,
+          };
+          return [summary, ...prev];
+        }
+        const next = [...prev];
+        const [moved] = next.splice(idx, 1);
+        next.unshift({ ...moved, lastMessageAt: now });
+        return next;
+      });
+    };
+
     const ctrl = sendMessageStream(text, {
       onTextDelta(delta) {
         updateBotMessage(content => content + delta);
@@ -224,6 +366,10 @@ function AppInner() {
       },
 
       onRawEvent(event) {
+        // Every backend SSE frame flows through here, so this is the cheapest
+        // hook for "first byte from backend".
+        primeSidebar();
+
         // Coalesce consecutive text_delta events into a single growing entry,
         // so a multi-paragraph response doesn't flood the debug panel with
         // hundreds of one-token rows.
@@ -253,6 +399,9 @@ function AppInner() {
       onDone() {
         clearBotStreaming();
         finishStream();
+        // Reconcile with backend so the title (and any other fields the runtime
+        // synthesized) reflect the server's authoritative state.
+        void refreshConversations('replace');
       },
 
       onError() {
@@ -260,30 +409,45 @@ function AppInner() {
         updateBotMessage(content => content || t("status.error"));
         finishStream();
       },
-    }, conversationIdRef.current);
+    }, conversationIdRef.current, {
+      userId: eoUuidRef.current,
+      userMsgId: userMsg.id,
+      botMsgId,
+    });
 
     abortCtrlRef.current = ctrl;
-  }, [updateBotMessage, clearBotStreaming, finishStream, t]);
+  }, [updateBotMessage, clearBotStreaming, finishStream, refreshConversations, t]);
 
   const handleClearHistory = useCallback(() => {
+    const oldConvId = conversationIdRef.current;
+
     if (abortCtrlRef.current) {
       abortCtrlRef.current.abort();
       abortCtrlRef.current = null;
     }
 
-    const oldConvId = conversationIdRef.current;
+    // Clear backend history for the old conversation without blocking local UI reset.
+    clearConversationHistory(oldConvId, eoUuidRef.current).then(ok => {
+      if (!ok) {
+        console.warn('[history] backend clear request failed');
+      }
+    }).finally(() => {
+      // Refresh sidebar — the cleared conversation may disappear from the list.
+      void refreshConversations('replace');
+    });
+
     deleteSnapshot(oldConvId).catch(() => {});
 
-    localStorage.removeItem(CONVERSATION_ID_STORAGE_KEY);
     const newId = crypto.randomUUID();
     localStorage.setItem(CONVERSATION_ID_STORAGE_KEY, newId);
     conversationIdRef.current = newId;
+    setActiveConversationId(newId);
     setMessages([]);
     setDebugEvents([]);
     setRightPanelMode('code');
     setLoading(false);
     initDoneRef.current = false;
-  }, []);
+  }, [refreshConversations]);
 
   const handleStop = useCallback(() => {
     // 1. Immediately abort frontend SSE read
@@ -304,12 +468,97 @@ function AppInner() {
     });
   }, [updateBotMessage, t]);
 
+  /** User clicked a conversation in the sidebar. */
+  const handleSelectConversation = useCallback((id: string) => {
+    if (loading) return;
+    if (id === conversationIdRef.current) return;
+
+    localStorage.setItem(CONVERSATION_ID_STORAGE_KEY, id);
+    conversationIdRef.current = id;
+    setActiveConversationId(id);
+    setRightPanelMode('code');
+    void loadConversation(id);
+  }, [loading, loadConversation]);
+
+  /** User clicked "New chat" in the sidebar. */
+  const handleCreateConversation = useCallback(() => {
+    if (loading) return;
+
+    const newId = crypto.randomUUID();
+    localStorage.setItem(CONVERSATION_ID_STORAGE_KEY, newId);
+    conversationIdRef.current = newId;
+    setActiveConversationId(newId);
+    setMessages([]);
+    setDebugEvents([]);
+    setRightPanelMode('code');
+    initDoneRef.current = false;
+    setHistoryLoading(false);
+  }, [loading]);
+
+  const handleLoadMoreConversations = useCallback(() => {
+    if (!nextCursor || conversationsLoadingMore) return;
+    void refreshConversations('append', nextCursor);
+  }, [nextCursor, conversationsLoadingMore, refreshConversations]);
+
+  /**
+   * User clicked the trash icon on a sidebar item.
+   *
+   * Optimistic delete: immediately remove the item from local UI state and
+   * fire-and-forget the backend request. We don't await or block the user —
+   * if the network call fails, we log it but don't roll back, since reloading
+   * the page will reconcile via /conversations anyway.
+   */
+  const handleDeleteConversation = useCallback((id: string) => {
+    if (loading) return;
+    if (!id) return;
+
+    const confirmed = window.confirm(t('sidebar.deleteConfirm'));
+    if (!confirmed) return;
+
+    const isActive = id === conversationIdRef.current;
+
+    setConversations(prev => prev.filter(c => c.id !== id));
+
+    if (isActive) {
+      const newId = crypto.randomUUID();
+      localStorage.setItem(CONVERSATION_ID_STORAGE_KEY, newId);
+      conversationIdRef.current = newId;
+      setActiveConversationId(newId);
+      setMessages([]);
+      setDebugEvents([]);
+      setRightPanelMode('code');
+      initDoneRef.current = false;
+      setHistoryLoading(false);
+    }
+
+    void deleteSnapshot(id).catch(() => {});
+
+    void deleteConversation(id, eoUuidRef.current).catch(e => {
+      console.warn('[delete-conversation] backend request failed:', e);
+    });
+  }, [loading, t]);
+
+  const sidebarHasMore = useMemo(() => Boolean(nextCursor), [nextCursor]);
+
   return (
     <div className={styles.shell}>
       <div className={styles.blob1} />
       <div className={styles.blob2} />
 
       <div className={styles.stage}>
+        <ConversationSidebar
+          conversations={conversations}
+          activeConversationId={activeConversationId}
+          loading={conversationsLoading}
+          loadingMore={conversationsLoadingMore}
+          hasMore={sidebarHasMore}
+          disabled={loading}
+          onSelect={handleSelectConversation}
+          onCreate={handleCreateConversation}
+          onLoadMore={handleLoadMoreConversations}
+          onDelete={handleDeleteConversation}
+        />
+
         <div className={styles.chatPanel}>
           <header className={styles.header}>
             <div className={styles.headerLeft}>

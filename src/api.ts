@@ -2,19 +2,29 @@
  * Backend API (EdgeOne Makers)
  *
  * Route mapping (file → route):
- *   agents/chat/index.ts                → POST /chat     Main chat endpoint
- *   agents/stop/index.ts                → POST /stop     Abort the active agent run
- *   cloud-functions/history/index.ts    → POST /history  Get conversation history
+ *   agents/chat/index.ts                         → POST /chat                  Main chat endpoint (SSE)
+ *   agents/stop/index.ts                         → POST /stop                  Abort the active agent run
+ *   cloud-functions/history/index.ts             → POST /history               Get conversation history
+ *   cloud-functions/conversations/index.ts       → POST /conversations         List conversations for a user
+ *   cloud-functions/clear-history/index.ts       → POST /clear-history         Clear messages of one conversation
+ *   cloud-functions/delete-conversation/index.ts → POST /delete-conversation   Permanently delete a conversation
  *
  * This file defines all API paths and request wrappers.
  */
 
-import type { Message } from './types';
+import type {
+  Message,
+  ListConversationsParams,
+  ListConversationsResponse,
+} from './types';
 
 export const API = {
   chat: '/chat',
-  chatStop: '/stop',   // Abort the active agent run
-  history: '/history', // Get conversation history
+  chatStop: '/stop',                        // Abort the active agent run
+  history: '/history',                      // Get conversation history
+  clearHistory: '/clear-history',           // Clear messages in a conversation
+  conversations: '/conversations',          // List conversations for a user
+  deleteConversation: '/delete-conversation', // Permanently delete a conversation
 } as const;
 
 export interface RawSseEvent {
@@ -33,7 +43,10 @@ export interface StreamCallbacks {
 }
 
 /** Get conversation history for restoring the chat window after page refresh. */
-export async function fetchConversationHistory(conversationId: string): Promise<Message[]> {
+export async function fetchConversationHistory(
+  conversationId: string,
+  userId?: string,
+): Promise<Message[]> {
   const startTime = Date.now();
   console.log(`[History] Request start time: ${new Date(startTime).toLocaleString()}`);
 
@@ -44,7 +57,7 @@ export async function fetchConversationHistory(conversationId: string): Promise<
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ conversation_id: conversationId }),
+        body: JSON.stringify({ conversation_id: conversationId, user_id: userId }),
       });
 
       // 409 = Active request on same conversation (React StrictMode double-render), retry shortly
@@ -89,6 +102,7 @@ export function sendMessageStream(
   message: string,
   callbacks: StreamCallbacks,
   conversationId?: string,
+  options?: { userId?: string; userMsgId?: string; botMsgId?: string },
 ): AbortController {
   const ctrl = new AbortController();
 
@@ -104,7 +118,15 @@ export function sendMessageStream(
       const res = await fetch(API.chat, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({
+          message,
+          // userId is camelCase here for parity with claude-agent-starter's
+          // chat handler convention. The backend reads body.userId ?? body.user_id
+          // to be tolerant of both.
+          userId: options?.userId,
+          userMsgId: options?.userMsgId,
+          botMsgId: options?.botMsgId,
+        }),
         signal: ctrl.signal,
       });
 
@@ -210,7 +232,6 @@ function dispatchSseChunk(part: string, cb: StreamCallbacks, markDone: () => voi
 
 /**
  * Request the backend to abort the currently running agent
- * 对应 agents/chat/stop.py → POST /chat/stop
  *
  * Note: the stop request header must NOT carry the same conversation_id as chat,
  * otherwise the runtime will overwrite chat's cancel_event with stop's cancel_event,
@@ -222,6 +243,89 @@ export async function stopAgent(conversationId?: string): Promise<boolean> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ conversation_id: conversationId }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Clear backend conversation history for the given conversation ID. */
+export async function clearConversationHistory(
+  conversationId?: string,
+  userId?: string,
+): Promise<boolean> {
+  if (!conversationId) return false;
+
+  try {
+    const res = await fetch(API.clearHistory, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: conversationId, user_id: userId }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * List conversations for the given user (eo-uuid).
+ * Returns at most `limit` (default 20) conversations ordered by lastMessageAt desc by default.
+ */
+export async function listConversations(
+  params: ListConversationsParams,
+): Promise<ListConversationsResponse> {
+  const startTime = performance.now();
+  console.log(`[conversations] start: ${new Date().toISOString()}`);
+
+  const empty: ListConversationsResponse = { conversations: [] };
+
+  try {
+    const res = await fetch(API.conversations, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: params.userId,
+        limit: params.limit,
+        order: params.order,
+        after: params.after,
+        before: params.before,
+      }),
+    });
+
+    if (!res.ok) {
+      console.warn(`[conversations] HTTP ${res.status}`);
+      console.log(`[conversations] end: ${new Date().toISOString()}, total: ${(performance.now() - startTime).toFixed(2)}ms`);
+      return empty;
+    }
+
+    const data = (await res.json().catch(() => null)) as ListConversationsResponse | null;
+    console.log(`[conversations] end: ${new Date().toISOString()}, total: ${(performance.now() - startTime).toFixed(2)}ms, count=${data?.conversations?.length ?? 0}`);
+    if (!data || !Array.isArray(data.conversations)) return empty;
+    return {
+      conversations: data.conversations,
+      nextCursor: data.nextCursor,
+      previousCursor: data.previousCursor,
+    };
+  } catch (e) {
+    console.warn('[conversations] request failed:', e);
+    return empty;
+  }
+}
+
+/** Permanently delete a conversation (irreversible). */
+export async function deleteConversation(
+  conversationId: string,
+  userId?: string,
+): Promise<boolean> {
+  if (!conversationId) return false;
+
+  try {
+    const res = await fetch(API.deleteConversation, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: conversationId, user_id: userId }),
     });
     return res.ok;
   } catch {
