@@ -10,7 +10,7 @@ const zh = {
 
   // Chat input
   "chat.placeholder": "输入消息...  ⏎ 发送 · Shift+⏎ 换行",
-  "chat.hint": "由 OpenAI Agents SDK 驱动 · 仅供演示",
+  "chat.hint": "由 OpenAI Agents SDK + EdgeOne Makers 驱动 · 仅供演示",
 
   // Preset questions
   "preset.1": "北京现在天气怎么样？有什么穿衣建议？",
