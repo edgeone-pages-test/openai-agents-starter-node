@@ -22,7 +22,7 @@ import { createTools } from '../_tools';
 import { sseResponse } from '../_sse';
 
 const logger = createLogger('chat');
-const DEFAULT_MODEL = '@makers/hy3-preview';
+const DEFAULT_MODEL = '@makers/deepseek-v4-flash';
 
 export async function onRequest(context: any) {
   const body = context.request.body ?? {};
