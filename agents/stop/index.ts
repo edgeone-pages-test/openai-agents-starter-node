@@ -15,13 +15,14 @@
  * The target conversation_id is passed only via request body.
  */
 
+import type { AgentContext } from '@edgeone/types';
 import { createLogger } from '../_logger';
 
 const logger = createLogger('stop');
 
-export async function onRequest(context: any) {
+export async function onRequest(context: AgentContext) {
   const { request } = context;
-  const conversationId = request?.body?.conversation_id as string | undefined;
+  const conversationId = ((request?.body ?? {}) as Record<string, any>)?.conversation_id as string | undefined;
 
   logger.log('conversationId:', conversationId);
 

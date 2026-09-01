@@ -1,3 +1,4 @@
+import type { CloudFunctionContext } from '@edgeone/types';
 /**
  * Conversations handler — EdgeOne Makers Node Function
  * ===================================================
@@ -5,7 +6,7 @@
  * File path cloud-functions/conversations/index.ts maps to **POST /conversations**.
  *
  * Lists conversations belonging to the requesting user (`eo-uuid`).
- * Calls `context.agent.store.listConversations({ userId, limit, order, after, before })`,
+ * Calls `context.agent!.store.listConversations({ userId, limit, order, after, before })`,
  * then normalizes the runtime result into a stable shape for the frontend:
  *
  * Response:
@@ -20,7 +21,7 @@
  *
  * Following the official EdgeOne Makers Node Functions docs:
  *   - export `onRequestPost` for POST handlers
- *   - read JSON body via `await context.request.json()`
+ *   - read JSON body via `await context.request!.json()`
  *   - return a `Response` object
  *   https://pages.edgeone.ai/document/node-functions
  */
@@ -51,9 +52,9 @@ function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
 
-async function readJsonBody(context: any): Promise<Record<string, unknown>> {
+async function readJsonBody(context: CloudFunctionContext): Promise<Record<string, unknown>> {
   try {
-    const data = await context.request.json();
+    const data = await context.request!.json();
     return data && typeof data === 'object' && !Array.isArray(data)
       ? (data as Record<string, unknown>)
       : {};
@@ -225,7 +226,7 @@ function pickCursor(rawResult: any, ...keys: string[]): string | undefined {
   return undefined;
 }
 
-export async function onRequestPost(context: any): Promise<Response> {
+export async function onRequestPost(context: CloudFunctionContext): Promise<Response> {
   const startTime = Date.now();
   logger.log(`[conversations] start: ${new Date(startTime).toISOString()}`);
 
@@ -236,7 +237,7 @@ export async function onRequestPost(context: any): Promise<Response> {
   const after = pickString(body, 'after', 'cursor');
   const before = pickString(body, 'before');
 
-  const store = context.agent.store;
+  const store = context.agent!.store;
 
   if (!userId) {
     logger.error('Missing userId');
@@ -281,7 +282,7 @@ export async function onRequestPost(context: any): Promise<Response> {
             userId,
             limit: 5,
             order: 'asc',
-          });
+          } as any);
           if (!Array.isArray(messages)) return;
           for (const msg of messages) {
             if (!msg || typeof msg !== 'object') continue;

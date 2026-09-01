@@ -4,7 +4,7 @@
  *
  * File path cloud-functions/history/index.ts maps to **POST /history**.
  *
- * Reads conversation history from `context.agent.store.getMessages()` and
+ * Reads conversation history from `context.agent!.store.getMessages()` and
  * returns it to the frontend for restoring the chat window after a page
  * refresh.
  *
@@ -16,11 +16,12 @@
  *
  * Following the official EdgeOne Makers Node Functions docs:
  *   - export `onRequestPost` for POST handlers
- *   - read JSON body via `await context.request.json()`
+ *   - read JSON body via `await context.request!.json()`
  *   - return a `Response` object
  *   https://pages.edgeone.ai/document/node-functions
  */
 
+import type { CloudFunctionContext } from '@edgeone/types';
 import { createLogger } from '../_logger';
 
 const logger = createLogger('history');
@@ -51,9 +52,9 @@ function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
 
-async function readJsonBody(context: any): Promise<Record<string, unknown>> {
+async function readJsonBody(context: CloudFunctionContext): Promise<Record<string, unknown>> {
   try {
-    const data = await context.request.json();
+    const data = await context.request!.json();
     return data && typeof data === 'object' && !Array.isArray(data)
       ? (data as Record<string, unknown>)
       : {};
@@ -62,7 +63,7 @@ async function readJsonBody(context: any): Promise<Record<string, unknown>> {
   }
 }
 
-function getConversationId(context: any, body: Record<string, unknown>): string {
+function getConversationId(context: CloudFunctionContext, body: Record<string, unknown>): string {
   const fromBody = body.conversation_id ?? body.conversationId;
   if (typeof fromBody === 'string' && fromBody.trim()) return fromBody.trim();
 
@@ -173,13 +174,13 @@ function dedupeAdjacent(messages: FrontendMessage[]): FrontendMessage[] {
 
 // ── Handler ─────────────────────────────────────────────────
 
-export async function onRequestPost(context: any): Promise<Response> {
+export async function onRequestPost(context: CloudFunctionContext): Promise<Response> {
   const requestStartTime = Date.now();
   logger.log(`[history] start: ${new Date(requestStartTime).toISOString()}`);
 
   const body = await readJsonBody(context);
   const conversationId = getConversationId(context, body);
-  const { store } = context.agent;
+  const { store } = context.agent!;
 
   logger.log('conversationId:', conversationId || '-');
 

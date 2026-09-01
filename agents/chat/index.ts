@@ -15,6 +15,7 @@
  *   context.runId           — current run ID
  */
 
+import type { AgentContext } from '@edgeone/types';
 import OpenAI from 'openai';
 import { run, Agent, OpenAIChatCompletionsModel, type Session } from '@openai/agents';
 import { createLogger } from '../_logger';
@@ -24,8 +25,8 @@ import { sseResponse } from '../_sse';
 const logger = createLogger('chat');
 const DEFAULT_MODEL = '@makers/deepseek-v4-flash';
 
-export async function onRequest(context: any) {
-  const body = context.request.body ?? {};
+export async function onRequest(context: AgentContext) {
+  const body = (context.request.body ?? {}) as Record<string, any>;
   const message = body.message as string | undefined;
   if (!message) {
     return new Response(
@@ -63,7 +64,7 @@ export async function onRequest(context: any) {
         userId,
       };
       if (userMsgId) appendArgs.messageId = userMsgId;
-      await context.store.appendMessage(appendArgs);
+      await context.store.appendMessage(appendArgs as any);
     } catch (e) {
       // Non-fatal — chat itself should keep working even if the
       // user-index write fails.
@@ -73,7 +74,7 @@ export async function onRequest(context: any) {
 
   // Use built-in store session adapter for persistence
   const session: Session | undefined = conversationId
-    ? context.store.openaiSession(conversationId)
+    ? context.store.openaiSession(conversationId) as unknown as Session
     : undefined;
 
   // Configure the OpenAI-compatible LLM model directly from runtime env.

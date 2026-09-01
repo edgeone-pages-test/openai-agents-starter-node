@@ -6,7 +6,7 @@
  * **POST /delete-conversation**.
  *
  * Permanently deletes an entire conversation via
- * `context.agent.store.deleteConversation({ conversationId })`. Removes the
+ * `context.agent!.store.deleteConversation({ conversationId })`. Removes the
  * message index, conversation metadata and the global conversation index —
  * irreversible.
  *
@@ -15,11 +15,12 @@
  *
  * Following the official EdgeOne Makers Node Functions docs:
  *   - export `onRequestPost` for POST handlers
- *   - read JSON body via `await context.request.json()`
+ *   - read JSON body via `await context.request!.json()`
  *   - return a `Response` object
  *   https://pages.edgeone.ai/document/node-functions
  */
 
+import type { CloudFunctionContext } from '@edgeone/types';
 import { createLogger } from '../_logger';
 
 const logger = createLogger('delete-conversation');
@@ -30,9 +31,9 @@ function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
 }
 
-async function readJsonBody(context: any): Promise<Record<string, unknown>> {
+async function readJsonBody(context: CloudFunctionContext): Promise<Record<string, unknown>> {
   try {
-    const data = await context.request.json();
+    const data = await context.request!.json();
     return data && typeof data === 'object' && !Array.isArray(data)
       ? (data as Record<string, unknown>)
       : {};
@@ -51,14 +52,14 @@ function getUserId(body: Record<string, unknown>): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-export async function onRequestPost(context: any): Promise<Response> {
+export async function onRequestPost(context: CloudFunctionContext): Promise<Response> {
   const startTime = Date.now();
   logger.log(`[delete-conversation] start: ${new Date(startTime).toISOString()}`);
 
   const body = await readJsonBody(context);
   const conversationId = getConversationId(body);
   const userId = getUserId(body);
-  const { store } = context.agent;
+  const { store } = context.agent!;
 
   logger.log('conversationId:', conversationId, 'userId:', userId || '-');
 
@@ -71,7 +72,7 @@ export async function onRequestPost(context: any): Promise<Response> {
   try {
     const args: Record<string, unknown> = { conversationId };
     if (userId) args.userId = userId;
-    await store.deleteConversation(args);
+    await store.deleteConversation(args as any);
 
     logger.log(`[delete-conversation] end: ${new Date().toISOString()}, total: ${Date.now() - startTime}ms`);
     return jsonResponse({ status: 'ok', conversation_id: conversationId });
